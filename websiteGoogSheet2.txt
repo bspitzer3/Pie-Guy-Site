@@ -1,0 +1,595 @@
+const SHEET_ID = 'PASTE_YOUR_GOOGLE_SHEET_ID_HERE';
+const INVENTORY_SHEET = 'Inventory';
+const ORDERS_SHEET = 'Orders';
+
+function doGet() {
+  return HtmlService.createHtmlOutputFromFile('Index')
+    .setTitle('The Pie Guy | Limited Pie Orders');
+}
+
+function getSpreadsheet_() {
+  return SpreadsheetApp.openById(SHEET_ID);
+}
+
+function getSheet_(name) {
+  const sheet = getSpreadsheet_().getSheetByName(name);
+  if (!sheet) {
+    throw new Error(`Sheet not found: ${name}`);
+  }
+  return sheet;
+}
+
+function normalizeBoolean_(value) {
+  if (value === true) return true;
+  if (typeof value === 'string') {
+    return value.toLowerCase() === 'true';
+  }
+  return false;
+}
+
+function getInventoryRecords_() {
+  const sheet = getSheet_(INVENTORY_SHEET);
+  const values = sheet.getDataRange().getValues();
+
+  if (values.length < 2) {
+    return [];
+  }
+
+  const headers = values[0].map(String);
+  const rows = values.slice(1);
+
+  return rows
+    .map((row, index) => {
+      const record = Object.fromEntries(headers.map((header, i) => [header, row[i]]));
+      return {
+        rowNumber: index + 2,
+        sku: String(record.sku || '').trim(),
+        name: String(record.name || '').trim(),
+        price: Number(record.price || 0),
+        remaining: Number(record.remaining || 0),
+        active: normalizeBoolean_(record.active),
+        updated_at: record.updated_at || '',
+      };
+    })
+    .filter((item) => item.sku && item.active);
+}
+
+function buildPublicState_() {
+  const items = getInventoryRecords_().map((item) => ({
+    sku: item.sku,
+    name: item.name,
+    price: item.price,
+    remaining: item.remaining,
+  }));
+
+  const totalRemaining = items.reduce((sum, item) => sum + item.remaining, 0);
+
+  return {
+    items,
+    totalRemaining,
+    isSoldOut: totalRemaining <= 0,
+    serverTime: new Date().toISOString(),
+  };
+}
+
+function getPublicState() {
+  return buildPublicState_();
+}
+
+function submitOrder(order) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+
+  try {
+    const name = String(order?.name || '').trim();
+    const email = String(order?.email || '').trim();
+    const phone = String(order?.phone || '').trim();
+    const pickupDate = String(order?.pickupDate || '').trim();
+    const notes = String(order?.notes || '').trim();
+    const sku = String(order?.sku || '').trim();
+    const quantity = Number(order?.quantity || 0);
+
+    if (!name) throw new Error('Please enter your name.');
+    if (!email) throw new Error('Please enter your email.');
+    if (!sku) throw new Error('Please choose a pie.');
+    if (!Number.isInteger(quantity) || quantity < 1) {
+      throw new Error('Quantity must be at least 1.');
+    }
+
+    const inventorySheet = getSheet_(INVENTORY_SHEET);
+    const ordersSheet = getSheet_(ORDERS_SHEET);
+    const inventory = getInventoryRecords_();
+    const item = inventory.find((entry) => entry.sku === sku);
+
+    if (!item) {
+      throw new Error('That pie is not currently available.');
+    }
+
+    if (item.remaining < quantity) {
+      throw new Error(`Only ${item.remaining} ${item.remaining === 1 ? 'pie is' : 'pies are'} left for ${item.name}.`);
+    }
+
+    const newRemaining = item.remaining - quantity;
+    const now = new Date();
+    const orderId = `PG-${Utilities.formatDate(now, Session.getScriptTimeZone(), 'yyyyMMdd-HHmmss')}-${Math.floor(Math.random() * 1000)}`;
+
+    // Update inventory first while lock is held.
+    inventorySheet.getRange(item.rowNumber, 4).setValue(newRemaining); // remaining
+    inventorySheet.getRange(item.rowNumber, 6).setValue(now);          // updated_at
+
+    // Append immutable order log row.
+    ordersSheet.appendRow([
+      orderId,
+      now,
+      item.sku,
+      item.name,
+      quantity,
+      item.price,
+      name,
+      email,
+      phone,
+      pickupDate,
+      notes,
+      newRemaining,
+      'RESERVED',
+    ]);
+
+    SpreadsheetApp.flush();
+
+    return {
+      ok: true,
+      message: `Thanks, ${name}! Your request for ${quantity} ${quantity === 1 ? 'pie' : 'pies'} has been captured for ${item.name}.`,
+      orderId,
+      state: buildPublicState_(),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error.message || 'Something went wrong while placing the order.',
+      state: buildPublicState_(),
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function setupSheets() {
+  const ss = getSpreadsheet_();
+
+  let inventory = ss.getSheetByName(INVENTORY_SHEET);
+  if (!inventory) inventory = ss.insertSheet(INVENTORY_SHEET);
+
+  let orders = ss.getSheetByName(ORDERS_SHEET);
+  if (!orders) orders = ss.insertSheet(ORDERS_SHEET);
+
+  inventory.clear();
+  orders.clear();
+
+  inventory.getRange(1, 1, 1, 6).setValues([[
+    'sku', 'name', 'price', 'remaining', 'active', 'updated_at'
+  ]]);
+
+  inventory.getRange(2, 1, 3, 6).setValues([
+    ['apple', 'Apple Pie', 18, 12, true, ''],
+    ['pumpkin', 'Pumpkin Pie', 20, 10, true, ''],
+    ['cherry', 'Cherry Pie', 22, 8, true, ''],
+  ]);
+
+  orders.getRange(1, 1, 1, 13).setValues([[
+    'order_id', 'created_at', 'sku', 'item_name', 'quantity', 'unit_price',
+    'customer_name', 'email', 'phone', 'pickup_date', 'notes', 'remaining_after', 'status'
+  ]]);
+}
+
+
+
+
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+HTML
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <base target="_top">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Pie Guy | Limited Pie Orders</title>
+  <style>
+    :root {
+      --blue-900: #0f4fa8;
+      --blue-800: #1660c4;
+      --blue-100: #e8f1ff;
+      --red-800: #b4232f;
+      --red-700: #c92a36;
+      --red-100: #fde9eb;
+      --yellow-600: #c89200;
+      --yellow-100: #fff4cc;
+      --slate-950: #0f172a;
+      --slate-800: #1f2937;
+      --slate-700: #334155;
+      --slate-300: #cbd5e1;
+      --slate-200: #e2e8f0;
+      --slate-100: #f8fafc;
+      --white: #ffffff;
+      --shadow: 0 18px 40px rgba(15, 23, 42, 0.10);
+      --radius-xl: 24px;
+      --radius-lg: 18px;
+      --max-width: 1120px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; font-family: Arial, Helvetica, sans-serif; color: var(--slate-950); background: var(--white); line-height: 1.5; }
+    img { max-width: 100%; display: block; }
+    a { color: inherit; text-decoration: none; }
+    button, input, select, textarea { font: inherit; }
+    .container { width: min(calc(100% - 2rem), var(--max-width)); margin: 0 auto; }
+    .site-header { position: sticky; top: 0; z-index: 100; background: rgba(255,255,255,0.96); backdrop-filter: blur(8px); border-bottom: 4px solid var(--blue-800); }
+    .header-inner { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem 0; }
+    .brand { display: flex; align-items: center; gap: 0.9rem; min-width: 0; }
+    .brand-logo { width: 56px; height: 56px; border-radius: 50%; border: 2px solid var(--blue-800); background: var(--white); object-fit: contain; flex-shrink: 0; }
+    .brand-title { font-size: 1.25rem; font-weight: 900; letter-spacing: -0.02em; color: var(--blue-900); margin: 0; }
+    .brand-subtitle { margin: 0.1rem 0 0; font-size: 0.95rem; color: var(--slate-700); font-weight: 600; }
+    .nav { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+    .nav a { padding: 0.45rem 0.7rem; border-radius: 10px; font-weight: 700; color: var(--slate-950); }
+    .hero { background: linear-gradient(to bottom, #eef5ff, #ffffff 50%); border-bottom: 1px solid var(--slate-200); }
+    .hero-grid, .order-grid { display: grid; gap: 2rem; padding: 4rem 0; }
+    .hero-grid { grid-template-columns: 1.1fr 0.9fr; align-items: center; }
+    .pill { display: inline-flex; align-items: center; padding: 0.35rem 0.85rem; border-radius: 999px; border: 1px solid var(--yellow-600); background: var(--yellow-100); color: var(--slate-950); font-size: 0.9rem; font-weight: 800; }
+    h1,h2,h3,p { margin-top: 0; }
+    .hero h1 { font-size: clamp(2.25rem, 5vw, 4.5rem); line-height: 1.05; margin: 1rem 0 0; letter-spacing: -0.03em; }
+    .lead { margin-top: 1.1rem; max-width: 45rem; color: var(--slate-800); font-size: 1.125rem; line-height: 1.8; }
+    .button-row { margin-top: 1.75rem; display: flex; gap: 0.9rem; flex-wrap: wrap; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; padding: 0.95rem 1.4rem; border-radius: 18px; border: 2px solid transparent; font-weight: 900; cursor: pointer; }
+    .btn-primary { background: var(--blue-900); color: var(--white); }
+    .btn-secondary { background: var(--white); color: var(--red-800); border-color: var(--red-700); }
+    .card { background: var(--white); border: 4px solid var(--blue-800); border-radius: var(--radius-xl); padding: 1.5rem; box-shadow: var(--shadow); }
+    .availability-header { display: flex; align-items: center; gap: 1rem; }
+    .availability-logo { width: 80px; height: 80px; border-radius: 50%; border: 2px solid var(--blue-800); object-fit: contain; background: var(--white); }
+    .eyebrow { font-size: 0.8rem; font-weight: 900; letter-spacing: 0.2em; text-transform: uppercase; color: var(--blue-900); margin-bottom: 0.35rem; }
+    .availability-count { font-size: clamp(2rem, 4vw, 2.5rem); font-weight: 900; line-height: 1.05; margin: 0; }
+    .status-box { margin-top: 1.25rem; border: 2px solid var(--yellow-600); background: var(--yellow-100); border-radius: var(--radius-lg); padding: 1rem 1.1rem; }
+    .status-text { font-weight: 900; font-size: 1.15rem; margin: 0.35rem 0 0; }
+    .status-open { color: var(--blue-900); }
+    .status-warning, .status-closed { color: var(--red-800); }
+    .inventory-list { list-style: none; padding: 0; margin: 1.25rem 0 0; display: grid; gap: 0.8rem; }
+    .inventory-item { display: flex; align-items: center; justify-content: space-between; gap: 1rem; background: var(--slate-100); border: 1px solid var(--slate-200); border-radius: var(--radius-lg); padding: 0.95rem 1rem; }
+    .inventory-name { font-weight: 800; margin: 0; }
+    .inventory-price { margin: 0.2rem 0 0; font-size: 0.95rem; color: var(--slate-700); }
+    .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 0.4rem 0.7rem; font-size: 0.9rem; font-weight: 900; white-space: nowrap; }
+    .badge-blue { background: var(--blue-100); color: var(--blue-900); }
+    .badge-red { background: var(--red-100); color: var(--red-800); }
+    .section { padding: 4rem 0; }
+    .order-grid { grid-template-columns: 0.9fr 1.1fr; align-items: start; }
+    .section-label { font-size: 0.8rem; font-weight: 900; letter-spacing: 0.2em; text-transform: uppercase; color: var(--red-800); margin-bottom: 0.5rem; }
+    .section-title { font-size: clamp(2rem, 4vw, 2.75rem); line-height: 1.1; letter-spacing: -0.03em; margin-bottom: 1rem; }
+    .form-card { background: var(--white); border: 4px solid var(--red-700); border-radius: var(--radius-xl); padding: 1.5rem; box-shadow: var(--shadow); }
+    .form-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; margin-bottom: 1.25rem; }
+    .remaining-box { text-align: right; border: 2px solid var(--yellow-600); background: var(--yellow-100); border-radius: var(--radius-lg); padding: 0.85rem 1rem; min-width: 130px; }
+    .remaining-box p { margin: 0; }
+    .remaining-box .label { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 900; }
+    .remaining-box .value { font-size: 2rem; font-weight: 900; line-height: 1; margin-top: 0.35rem; }
+    .alert { margin-bottom: 1rem; border-radius: var(--radius-lg); padding: 0.9rem 1rem; font-size: 0.95rem; font-weight: 700; border: 1px solid transparent; display: none; }
+    .alert-success { border-color: #a6c8ff; background: var(--blue-100); color: #08326c; }
+    .alert-error { border-color: #f2b9bf; background: var(--red-100); color: #7a1821; }
+    .form-grid { display: grid; gap: 1rem; }
+    .form-grid.two-col { grid-template-columns: repeat(2, minmax(0,1fr)); }
+    .form-grid.item-row { grid-template-columns: 1.5fr 0.7fr; }
+    .field-wrap { display: grid; gap: 0.45rem; }
+    label span { font-size: 0.92rem; font-weight: 800; color: var(--slate-950); }
+    .field,.select,.textarea,.number-input { width: 100%; border: 2px solid var(--slate-300); border-radius: 18px; padding: 0.9rem 1rem; background: var(--white); color: var(--slate-950); }
+    .textarea { min-height: 120px; resize: vertical; }
+    .availability-note { border: 1px solid var(--slate-200); background: var(--slate-100); border-radius: var(--radius-lg); padding: 0.85rem 1rem; font-size: 0.95rem; color: var(--slate-950); }
+    .sold-out-panel { display: none; border: 2px solid var(--red-700); background: var(--red-100); border-radius: var(--radius-lg); padding: 1rem 1.1rem; }
+    .sold-out-panel h3 { margin-bottom: 0.5rem; color: var(--red-800); }
+    .footer { background: var(--slate-950); color: var(--white); border-top: 4px solid var(--blue-800); }
+    .footer-inner { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: 1.5rem 0; flex-wrap: wrap; }
+    .muted { color: #cbd5e1; }
+    @media (max-width: 900px) {
+      .hero-grid,.order-grid,.form-grid.two-col,.form-grid.item-row { grid-template-columns: 1fr; }
+      .header-inner,.form-top,.footer-inner { align-items: flex-start; }
+      .remaining-box { text-align: left; }
+    }
+    @media (max-width: 640px) {
+      .container { width: min(calc(100% - 1.25rem), var(--max-width)); }
+      .site-header { position: static; }
+      .nav { display: none; }
+      .hero-grid,.order-grid,.section { padding-top: 3rem; padding-bottom: 3rem; }
+      .form-card,.card { padding: 1.15rem; }
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <div class="container header-inner">
+      <div class="brand" aria-label="The Pie Guy brand">
+        https://via.placeholder.com/56x56?text=Pie
+        <div>
+          <p class="brand-title">The Pie Guy</p>
+          <p class="brand-subtitle">Fresh pies. Simple ordering.</p>
+        </div>
+      </div>
+      <nav class="nav" aria-label="Primary">
+        <a href="#order">Order</a>
+        <a href="#menu">Menu</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="container hero-grid">
+        <div>
+          <span class="pill">Limited pie drop</span>
+          <h1>Reserve your pie before the last one is gone.</h1>
+          <p class="lead">The Pie Guy is taking a limited number of orders. Inventory is shared live across all visitors and updates after each purchase.</p>
+          <div class="button-row">
+            <a class="btn btn-primary" href="#order">Order now</a>
+            <a class="btn btn-secondary" href="#menu">See the menu</a>
+          </div>
+        </div>
+
+        <aside class="card" aria-labelledby="availability-title">
+          <div class="availability-header">
+            <img class="availability-logo" src="https://via.placeholder.com/80x80?text=Pie" alt="The Pie Guy logo" />
+            <div>
+              <div class="eyebrow">Live availability</div>
+              <h2 id="availability-title" class="availability-count"><span id="heroRemaining">0</span> pies remaining</h2>
+            </div>
+          </div>
+          <div class="status-box" aria-live="polite">
+            <p class="eyebrow" style="margin-bottom:0; letter-spacing:0.08em;">Order status</p>
+            <p id="orderStatusText" class="status-text status-open">Loading inventory...</p>
+            <p style="margin:0.5rem 0 0; color:var(--slate-800); font-size:0.95rem;">Inventory is loaded directly from the shared Google Sheet.</p>
+          </div>
+          <ul id="inventoryList" class="inventory-list"></ul>
+        </aside>
+      </div>
+    </section>
+
+    <section id="order" class="section">
+      <div class="container order-grid">
+        <div>
+          <p class="section-label">Simple ordering form</p>
+          <h2 class="section-title">Place your order request</h2>
+          <p class="lead" style="font-size:1rem; max-width:38rem; margin-top:0;">Orders are written to the shared `Orders` sheet and inventory is updated server-side so all visitors see the same count.</p>
+        </div>
+
+        <div class="form-card">
+          <div class="form-top">
+            <div>
+              <h2 style="margin-bottom:0.25rem;">Order form</h2>
+              <p style="margin:0; color:var(--slate-700);">Complete the form below to reserve pies.</p>
+            </div>
+            <div class="remaining-box" aria-live="polite">
+              <p class="label">Pies remaining</p>
+              <p id="formRemaining" class="value">0</p>
+            </div>
+          </div>
+
+          <div id="formAlert" class="alert" role="status" aria-live="polite"></div>
+          <div id="soldOutPanel" class="sold-out-panel">
+            <h3>Sold out</h3>
+            <p style="margin:0; color:var(--slate-950);">Ordering has closed because the limited pie count has been reached.</p>
+          </div>
+
+          <form id="orderForm" class="form-grid">
+            <div class="form-grid two-col">
+              <label class="field-wrap"><span>Name</span><input class="field" type="text" name="name" placeholder="Your full name" required /></label>
+              <label class="field-wrap"><span>Email</span><input class="field" type="email" name="email" placeholder="you@example.com" required /></label>
+            </div>
+            <div class="form-grid two-col">
+              <label class="field-wrap"><span>Phone</span><input class="field" type="tel" name="phone" placeholder="(555) 555-5555" /></label>
+              <label class="field-wrap"><span>Pickup date</span><input class="field" type="date" name="pickupDate" /></label>
+            </div>
+            <div class="form-grid item-row">
+              <label class="field-wrap"><span>Pie selection</span><select id="sku" class="select" name="sku"></select></label>
+              <label class="field-wrap"><span>Quantity</span><input id="quantity" class="number-input" type="number" name="quantity" min="1" value="1" required /></label>
+            </div>
+            <div class="availability-note"><strong>Selected item availability:</strong> <span id="selectedAvailabilityText">Choose a pie to view availability.</span></div>
+            <label class="field-wrap"><span>Notes</span><textarea class="textarea" name="notes" placeholder="Pickup window, special instructions, or other details"></textarea></label>
+            <button id="submitButton" type="submit" class="btn btn-secondary" style="background:var(--red-700); color:var(--white); border-color:var(--red-700); width:100%;">Reserve pies</button>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <section id="menu" class="section">
+      <div class="container">
+        <h2 class="section-title">Current menu</h2>
+        <div id="inventoryListDuplicate" class="inventory-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container footer-inner">
+      <div>
+        <p style="margin:0; font-size:1.1rem; font-weight:900;">The Pie Guy</p>
+        <p class="muted" style="margin:0.25rem 0 0;">Live Google Sheets inventory + ordering</p>
+      </div>
+      <p class="muted" style="margin:0;">© 2026 The Pie Guy. All rights reserved.</p>
+    </div>
+  </footer>
+
+  <script>
+    let currentState = { items: [], totalRemaining: 0, isSoldOut: false };
+    const pollMs = 15000;
+
+    const inventoryList = document.getElementById('inventoryList');
+    const inventoryListDuplicate = document.getElementById('inventoryListDuplicate');
+    const heroRemaining = document.getElementById('heroRemaining');
+    const formRemaining = document.getElementById('formRemaining');
+    const orderStatusText = document.getElementById('orderStatusText');
+    const orderForm = document.getElementById('orderForm');
+    const formAlert = document.getElementById('formAlert');
+    const soldOutPanel = document.getElementById('soldOutPanel');
+    const skuSelect = document.getElementById('sku');
+    const quantityInput = document.getElementById('quantity');
+    const selectedAvailabilityText = document.getElementById('selectedAvailabilityText');
+    const submitButton = document.getElementById('submitButton');
+
+    function setAlert(type, message) {
+      if (!message) {
+        formAlert.style.display = 'none';
+        formAlert.className = 'alert';
+        formAlert.textContent = '';
+        return;
+      }
+      formAlert.style.display = 'block';
+      formAlert.className = `alert ${type === 'success' ? 'alert-success' : 'alert-error'}`;
+      formAlert.textContent = message;
+    }
+
+    function renderInventoryHtml(items) {
+      return items.map((item) => {
+        const badgeClass = item.remaining === 0 ? 'badge badge-red' : 'badge badge-blue';
+        const badgeText = item.remaining === 0 ? 'Sold out' : `${item.remaining} left`;
+        return `
+          <li class="inventory-item">
+            <div>
+              <p class="inventory-name">${item.name}</p>
+              <p class="inventory-price">$${Number(item.price).toFixed(2)}</p>
+            </div>
+            <span class="${badgeClass}">${badgeText}</span>
+          </li>
+        `;
+      }).join('');
+    }
+
+    function renderSelect(items) {
+      const current = skuSelect.value;
+      skuSelect.innerHTML = items.map((item) => {
+        const soldOut = item.remaining <= 0;
+        return `<option value="${item.sku}" ${soldOut ? 'disabled' : ''}>${item.name} — $${Number(item.price).toFixed(2)} ${soldOut ? '(Sold out)' : `(${item.remaining} left)`}</option>`;
+      }).join('');
+
+      const currentValid = items.some((item) => item.sku === current && item.remaining > 0);
+      if (currentValid) {
+        skuSelect.value = current;
+      } else {
+        const firstAvailable = items.find((item) => item.remaining > 0);
+        if (firstAvailable) skuSelect.value = firstAvailable.sku;
+      }
+    }
+
+    function getSelectedItem() {
+      return currentState.items.find((item) => item.sku === skuSelect.value);
+    }
+
+    function updateSelectedAvailability() {
+      const item = getSelectedItem();
+      if (!item) {
+        selectedAvailabilityText.textContent = 'Choose a pie to view availability.';
+        quantityInput.max = 1;
+        return;
+      }
+      quantityInput.max = Math.max(Number(item.remaining), 1);
+      if (Number(quantityInput.value) > Number(item.remaining) && Number(item.remaining) > 0) {
+        quantityInput.value = item.remaining;
+      }
+      if (Number(quantityInput.value) < 1 || Number.isNaN(Number(quantityInput.value))) {
+        quantityInput.value = 1;
+      }
+      selectedAvailabilityText.textContent = `${item.remaining} pie${item.remaining === 1 ? '' : 's'} remaining for ${item.name}.`;
+    }
+
+    function renderState(state) {
+      currentState = state;
+      heroRemaining.textContent = state.totalRemaining;
+      formRemaining.textContent = state.totalRemaining;
+      inventoryList.innerHTML = renderInventoryHtml(state.items);
+      inventoryListDuplicate.innerHTML = renderInventoryHtml(state.items);
+      renderSelect(state.items);
+      updateSelectedAvailability();
+
+      orderStatusText.className = 'status-text';
+      if (state.totalRemaining <= 0) {
+        orderStatusText.textContent = 'Sold out — ordering is closed';
+        orderStatusText.classList.add('status-closed');
+        soldOutPanel.style.display = 'block';
+        orderForm.style.display = 'none';
+      } else if (state.totalRemaining <= 5) {
+        orderStatusText.textContent = 'Almost gone — order soon';
+        orderStatusText.classList.add('status-warning');
+        soldOutPanel.style.display = 'none';
+        orderForm.style.display = 'grid';
+      } else {
+        orderStatusText.textContent = 'Open for orders';
+        orderStatusText.classList.add('status-open');
+        soldOutPanel.style.display = 'none';
+        orderForm.style.display = 'grid';
+      }
+    }
+
+    function loadState(showError = false) {
+      google.script.run
+        .withSuccessHandler((state) => {
+          renderState(state);
+          if (!showError) return;
+          setAlert();
+        })
+        .withFailureHandler((error) => {
+          if (showError) {
+            setAlert('error', error.message || 'Could not load current inventory.');
+          }
+        })
+        .getPublicState();
+    }
+
+    skuSelect.addEventListener('change', () => {
+      setAlert();
+      updateSelectedAvailability();
+    });
+
+    quantityInput.addEventListener('input', () => {
+      setAlert();
+      updateSelectedAvailability();
+    });
+
+    orderForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      setAlert();
+
+      const formData = new FormData(orderForm);
+      const payload = {
+        name: String(formData.get('name') || '').trim(),
+        email: String(formData.get('email') || '').trim(),
+        phone: String(formData.get('phone') || '').trim(),
+        pickupDate: String(formData.get('pickupDate') || '').trim(),
+        notes: String(formData.get('notes') || '').trim(),
+        sku: String(formData.get('sku') || '').trim(),
+        quantity: Number(formData.get('quantity') || 0),
+      };
+
+      submitButton.disabled = true;
+      submitButton.textContent = 'Submitting...';
+
+      google.script.run
+        .withSuccessHandler((result) => {
+          submitButton.disabled = false;
+          submitButton.textContent = 'Reserve pies';
+          renderState(result.state);
+          setAlert(result.ok ? 'success' : 'error', result.message);
+          if (result.ok) {
+            orderForm.reset();
+            quantityInput.value = 1;
+            updateSelectedAvailability();
+          }
+        })
+        .withFailureHandler((error) => {
+          submitButton.disabled = false;
+          submitButton.textContent = 'Reserve pies';
+          setAlert('error', error.message || 'Could not submit your order.');
+          loadState(false);
+        })
+        .submitOrder(payload);
+    });
+
+    loadState(true);
+    setInterval(() => loadState(false), pollMs);
+  </script>
+</body>
+</html>
